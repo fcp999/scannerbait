@@ -1,0 +1,16 @@
+
+
+services:
+  scannerbait:
+    build: .
+    container_name: scannerbait
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - PYTHONUNBUFFERED=1
