@@ -17,7 +17,7 @@ log.addHandler(handler)
 @app.route('/')
 def index():
     log.info("[+] GET / - home page accessed")
-    return "Welcome to Apache/2.4.41 (Ubuntu) Server at vulnerable.dev Port 80", 200
+    return "Welcome to Bank of Florida", 200
 
 @app.route('/admin/login.asp')
 @app.route('/wp-login.php')
