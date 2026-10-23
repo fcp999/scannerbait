@@ -1,11 +1,9 @@
-
-
 services:
   scannerbait:
     build: .
     container_name: scannerbait
     ports:
-      - "8080:80"
+      - "8099:80"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -14,3 +12,4 @@ services:
       - /tmp
     environment:
       - PYTHONUNBUFFERED=1
+      - SCANNERBAIT_RAW_CONTROLS=${SCANNERBAIT_RAW_CONTROLS:-1}
