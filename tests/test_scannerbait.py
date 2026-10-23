@@ -36,20 +36,20 @@ class ScannerbaitTests(unittest.TestCase):
         self.assertNotIn("\n", body)
         self.assertEqual(json.loads(body)["password_length"], 8)
 
-    def test_terminal_decoy_is_literal_by_default(self):
+    def test_terminal_decoy_defaults_to_raw_controls(self):
+        with patch.dict(os.environ, {}, clear=True):
+            response = self.client.get("/decoy/terminal.txt")
+        self.assertEqual(response.data.count(b"\x07"), 8)
+        self.assertIn(b"\x1b[30;40m", response.data)
+        self.assertIn(b"\x1b[0m", response.data)
+        self.assertIn(b'comma, quote, decoy', response.data)
+
+    def test_terminal_decoy_can_be_set_to_literal_text(self):
         with patch.dict(os.environ, {"SCANNERBAIT_RAW_CONTROLS": "0"}):
             response = self.client.get("/decoy/terminal.txt")
         self.assertNotIn(b"\x07", response.data)
         self.assertNotIn(b"\x1b", response.data)
         self.assertIn(b"\\x07", response.data)
-        self.assertIn(b'comma, quote, decoy', response.data)
-
-    def test_terminal_decoy_raw_mode_is_opt_in(self):
-        with patch.dict(os.environ, {"SCANNERBAIT_RAW_CONTROLS": "1"}):
-            response = self.client.get("/decoy/terminal.txt")
-        self.assertEqual(response.data.count(b"\x07"), 8)
-        self.assertIn(b"\x1b[30;40m", response.data)
-        self.assertIn(b"\x1b[0m", response.data)
 
 
 if __name__ == "__main__":

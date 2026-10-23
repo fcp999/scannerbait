@@ -131,8 +131,8 @@ def decoy_response(path):
 
 
 def terminal_decoy():
-    """A safe-by-default terminal/logging test payload on a dedicated route."""
-    raw = os.getenv("SCANNERBAIT_RAW_CONTROLS", "0").lower() in {"1", "true", "yes", "on"}
+    """A terminal/logging test payload on a dedicated route; raw controls default on."""
+    raw = os.getenv("SCANNERBAIT_RAW_CONTROLS", "1").lower() in {"1", "true", "yes", "on"}
     lines = [
         '2026-10-23 09:41:03 INFO account="guest", action="login", note="comma, quote, decoy"',
         "2026-10-23 09:41:04 WARN scanner probe captured",

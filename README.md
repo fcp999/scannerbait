@@ -17,15 +17,17 @@ docker compose logs -f scannerbait
 
 ## Terminal-control decoy
 
-`/decoy/terminal.txt` returns sample log lines with commas and quotes plus bell/ANSI sequences. By default, the sequences are literal text (`\x07`, `\x1b...`) and cannot ring a bell or recolor a terminal. To return actual BEL and ANSI bytes, explicitly set `SCANNERBAIT_RAW_CONTROLS=1` in the container environment and recreate it:
+`/decoy/terminal.txt` returns sample log lines with commas and quotes plus real BEL/ANSI bytes by default. The eight BEL bytes may ring a bell, and `ESC[30;40m` makes enclosed text black on black until `ESC[0m` resets it. This is intentionally aimed at testing how scanners and loggers handle terminal controls.
+
+To disable raw controls and return the visible strings `\x07` and `\x1b...` instead, set `SCANNERBAIT_RAW_CONTROLS=0` and recreate the container:
 
 ```sh
-SCANNERBAIT_RAW_CONTROLS=1 docker compose up -d --force-recreate
+SCANNERBAIT_RAW_CONTROLS=0 docker compose up -d --force-recreate
 ```
 
-Raw mode is off by default because terminal control bytes can disrupt or obscure downstream logs. Only enable it on a honeypot you control and when intentionally testing a scanner or logger. The route is a response body only; controls are never placed in HTTP headers or this server's own logs.
+The controls are confined to this route's response body. They are never placed in HTTP headers or Scannerbait's own logs.
 
 ## Configure
 
 - `PORT`: listener port inside the container; default `80`.
-- `SCANNERBAIT_RAW_CONTROLS`: `0` by default; set to `1` to return real terminal control bytes from the dedicated decoy route.
+- `SCANNERBAIT_RAW_CONTROLS`: `1` by default; set to `0` to return escaped visible text from the dedicated decoy route.
