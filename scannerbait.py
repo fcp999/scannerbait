@@ -31,6 +31,10 @@ def log_event(event, **fields):
 
 # Shipping is best-effort and must never fail a request: a scanner that gets a
 # 500 because the log collector is down is a scan we no longer observe.
+# Hostname the decoys present themselves as. Decoys that name a host are more
+# convincing than ones naming example.invalid, so this is operator-configurable.
+SERVERNAME = os.environ.get("SCANNERBAIT_SERVERNAME", "") or ""
+
 _SYSLOG = os.environ.get("SCANNERBAIT_SYSLOG", "")
 _SYSLOG_HOST, _, _SYSLOG_PORT = _SYSLOG.partition(":")
 _SHIP_FAILED = False
@@ -60,6 +64,16 @@ def _ship(body):
             logger.warning(format_event("syslog_ship_failed", target=_SYSLOG))
 
 
+def _host(default):
+    """Configured server name, or the given placeholder when unset.
+
+    Decoy bodies name a host that looks like the organisation's own; when the
+    operator has not configured one the .invalid placeholder is kept, because
+    inventing a real-looking name is worse than an obvious placeholder.
+    """
+    return SERVERNAME or default
+
+
 def decoy_response(path):
     """Return inert fake data for common secret/config probes; never read local files."""
     normalized = path.lower().rstrip("/") or "/"
@@ -71,18 +85,18 @@ def decoy_response(path):
 
     if normalized in ("/.git/config", "/.gitconfig") or normalized.endswith("/.git/config"):
         return ("[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
-                "[remote \"origin\"]\n\turl = https://code.example.invalid/bof/portal.git\n"
+                "\t[remote \"origin\"]\n\turl = https://" + _host("code.example.invalid") + "/bof/portal.git\n"
                 "\tfetch = +refs/heads/*:refs/remotes/origin/*\n", "text/plain", 200)
 
     if normalized.endswith("/.git-credentials"):
-        return ("https://buildbot:DECOY_ONLY_NOT_A_TOKEN@code.example.invalid\n",
+        return ("https://buildbot:DECOY_ONLY_NOT_A_TOKEN@" + _host("code.example.invalid") + "\n",
                 "text/plain", 200)
 
     if (normalized.startswith("/.ssh/") or leaf in {
         "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "private.key", "key.pem", ".pem", ".ppk"
     } or leaf.endswith((".pem", ".ppk", ".key"))):
         if leaf in {"config", "known_hosts", "known_hosts.old", "authorized_keys"}:
-            return ("# Synthetic SSH decoy; no usable keys\nHost staging.example.invalid\n"
+            return ("# Synthetic SSH decoy; no usable keys\nHost " + _host("staging.example.invalid") + "\n"
                     "  HostName 192.0.2.44\n  User deploy\n", "text/plain", 200)
         return ("-----BEGIN DECOY PRIVATE KEY-----\nNOT A REAL KEY - SCANNERBAIT TEST DATA\n"
                 "-----END DECOY PRIVATE KEY-----\n", "text/plain", 200)
@@ -93,7 +107,7 @@ def decoy_response(path):
 
     if ".env" in leaf or leaf in {"credentials", "credentials.json", "credentials.yml", "credentials.yaml",
                                  "secrets.yml", "secrets.yaml", "secret.yaml", "database.yml", "database.yaml"}:
-        return ("APP_NAME=BankPortal\nAPP_ENV=production\nDB_HOST=db.example.invalid\n"
+        return ("APP_NAME=BankPortal\nAPP_ENV=production\nDB_HOST=" + _host("db.example.invalid") + "\n"
                 "DB_USER=portal_readonly\nDB_PASSWORD=DECOY_ONLY_NOT_A_PASSWORD\n"
                 "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
                 "AWS_SECRET_ACCESS_KEY=DECOY_ONLY_NOT_A_CREDENTIAL\n"

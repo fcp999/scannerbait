@@ -17,3 +17,6 @@ services:
       # The docker0 gateway address works from an isolated compose bridge;
       # the collector's container name does not resolve across networks.
       - SCANNERBAIT_SYSLOG=${SCANNERBAIT_SYSLOG:-172.17.0.1:514}
+      # Hostname the decoys present themselves as, so a probe sees the box's
+      # own name rather than an obvious placeholder.
+      - SCANNERBAIT_SERVERNAME=${SCANNERBAIT_SERVERNAME:-intranet-dc01.fcp3.me}

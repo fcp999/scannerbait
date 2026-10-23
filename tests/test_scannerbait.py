@@ -75,6 +75,27 @@ class ScannerbaitTests(unittest.TestCase):
             self.assertEqual(before, after, f"request wrote to disk: {after - before}")
 
 
+class ServerNameTests(unittest.TestCase):
+    """Decoys present the configured hostname, and an obvious placeholder otherwise."""
+
+    def setUp(self):
+        self.client = scannerbait.app.test_client()
+
+    def test_decoys_use_the_configured_server_name(self):
+        with patch.dict(os.environ, {"SCANNERBAIT_SERVERNAME": "intranet-dc01.example.test"}):
+            with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"):
+                for path in ("/.git/config", "/.env", "/.ssh/config"):
+                    body = self.client.get(path).data.decode()
+                    self.assertIn("intranet-dc01.example.test", body, path)
+                    self.assertNotIn("example.invalid", body, path)
+
+    def test_placeholder_is_kept_when_unset(self):
+        with patch.object(scannerbait, "SERVERNAME", ""):
+            body = self.client.get("/.env").data.decode()
+            # An obvious placeholder beats inventing a real-looking hostname.
+            self.assertIn("example.invalid", body)
+
+
 if __name__ == "__main__":
     unittest.main()
 
