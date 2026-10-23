@@ -77,3 +77,69 @@ class ScannerbaitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyslogShippingTests(unittest.TestCase):
+    """Events ship to the collector as RFC 5424 lines, and only when configured."""
+
+    def setUp(self):
+        self.client = scannerbait.app.test_client()
+
+    def test_event_is_shipped_as_rfc5424(self):
+        received = []
+
+        class FakeSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def sendall(self, data):
+                received.append(data)
+
+        with patch.dict(os.environ, {"SCANNERBAIT_SYSLOG": "127.0.0.1:514"}):
+            scannerbait._SYSLOG = "127.0.0.1:514"
+            scannerbait._SYSLOG_HOST = "127.0.0.1"
+            scannerbait._SYSLOG_PORT = "514"
+            scannerbait._SHIP_FAILED = False
+            with patch("scannerbait.socket.create_connection", return_value=FakeSocket()):
+                self.client.get("/.env")
+
+        self.assertTrue(received, "expected one shipped line")
+        line = received[0].decode()
+        self.assertTrue(line.startswith("<14>1 "), line)
+        # RFC 5424 header: syslog version 1, then timestamp, hostname and app name.
+        parts = line.split(" ")
+        self.assertEqual(parts[0], "<14>1")
+        self.assertTrue(parts[1].endswith("Z"), f"timestamp field: {parts[1]}")
+        self.assertEqual(parts[3], "scannerbait", f"app name field: {parts[3]}")
+        self.assertIn('"event":"request"', line)
+
+    def test_no_shipping_when_unset(self):
+        with patch.dict(os.environ, {}, clear=True):
+            scannerbait._SYSLOG_HOST = ""
+            scannerbait._SHIP_FAILED = False
+            with patch("scannerbait.socket.create_connection") as connect:
+                scannerbait.log_event("request", path="/.env")
+            connectassert = connect.assert_not_called
+            connectassert()
+
+    def test_dead_collector_does_not_fail_the_request(self):
+        """A honeypot must still answer when the log collector is down."""
+        scannerbait._SYSLOG_HOST = "127.0.0.1"
+        scannerbait._SYSLOG_PORT = "1"
+        scannerbait._SHIP_FAILED = False
+        response = self.client.get("/.env")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(scannerbait._SHIP_FAILED)
+
+
+    def test_unset_syslog_does_not_ship(self):
+        """No collector configured means no outbound connection is attempted."""
+        with patch.dict(os.environ, {}, clear=True):
+            scannerbait._SYSLOG_HOST = ""
+            scannerbait._SHIP_FAILED = False
+            with patch("scannerbait.socket.create_connection") as connect:
+                scannerbait.log_event("request", path="/.env")
+            connect.assert_not_called()

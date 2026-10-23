@@ -3,7 +3,9 @@
 import json
 import logging
 import os
+import socket
 import sys
+import time
 from flask import Flask, Response, request
 
 app = Flask(__name__)
@@ -22,7 +24,40 @@ def format_event(event, **fields):
 
 
 def log_event(event, **fields):
-    logger.info(format_event(event, **fields))
+    body = format_event(event, **fields)
+    logger.info(body)
+    _ship(body)
+
+
+# Shipping is best-effort and must never fail a request: a scanner that gets a
+# 500 because the log collector is down is a scan we no longer observe.
+_SYSLOG = os.environ.get("SCANNERBAIT_SYSLOG", "")
+_SYSLOG_HOST, _, _SYSLOG_PORT = _SYSLOG.partition(":")
+_SHIP_FAILED = False
+
+
+def _ship(body):
+    """Forward one event to syslog over TCP, in RFC 5424 form.
+
+    The app name is fixed so the collector can label this feed distinctly from
+    the router and host feeds already arriving on the same port.
+    """
+    global _SHIP_FAILED
+    if not _SYSLOG_HOST or _SHIP_FAILED:
+        return
+    try:
+        port = int(_SYSLOG_PORT or 514)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        host = socket.gethostname() or "-"
+        # PRI 14 = facility user(1)*8 + severity info(6)
+        line = f"<14>1 {stamp} {host} scannerbait - - - {body}\n"
+        with socket.create_connection((_SYSLOG_HOST, port), timeout=1.0) as conn:
+            conn.sendall(line.encode("utf-8", "replace"))
+    except OSError:
+        # Log once, then stay quiet so a dead collector cannot fill stdout.
+        if not _SHIP_FAILED:
+            _SHIP_FAILED = True
+            logger.warning(format_event("syslog_ship_failed", target=_SYSLOG))
 
 
 def decoy_response(path):
