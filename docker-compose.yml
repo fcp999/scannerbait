@@ -3,7 +3,7 @@ services:
     build: .
     container_name: scannerbait
     ports:
-      - "8080:80"
+      - "8099:80"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

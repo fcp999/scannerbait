@@ -1,6 +1,6 @@
 # Scannerbait
 
-A small Flask honeypot for web scanners. It listens on port 80 in the container (port 8080 by default with Compose) and serves synthetic, inert decoy data for common exposure probes.
+A small Flask honeypot for web scanners. It listens on port 80 in the container (port 8099 by default with Compose) and serves synthetic, inert decoy data for common exposure probes.
 
 ## What it answers
 
