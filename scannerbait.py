@@ -1,5 +1,7 @@
 """A small web honeypot that serves inert, synthetic decoys to common probes."""
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -32,9 +34,75 @@ def log_event(event, **fields):
 
 # Shipping is best-effort and must never fail a request: a scanner that gets a
 # 500 because the log collector is down is a scan we no longer observe.
-# Hostname the decoys present themselves as. Decoys that name a host are more
-# convincing than ones naming example.invalid, so this is operator-configurable.
+# Hostname the decoys present themselves as. A named host is more convincing
+# than a placeholder, so this is operator-configurable.
 SERVERNAME = os.environ.get("SCANNERBAIT_SERVERNAME", "") or ""
+# Internal domain for decoy hostnames, derived from SERVERNAME so the fake
+# estate looks like part of the same organisation.
+DOMAIN = os.environ.get("SCANNERBAIT_DOMAIN", "") or (
+    SERVERNAME.split(".", 1)[1] if "." in SERVERNAME else "fcp3.me")
+
+# Seed for decoy credentials. Values are derived on demand rather than stored,
+# so no credential ever has to be written down or passed around, and a
+# redeploy with the same seed serves identical secrets.
+CRED_SEED = os.environ.get("SCANNERBAIT_CRED_SEED", "") or "scannerbait-decoy-seed"
+_B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+
+def _digest(label, length=32):
+    """Deterministic bytes for a labelled slot, keyed by the configured seed."""
+    out = b""
+    counter = 0
+    while len(out) < length:
+        out += hmac.new(CRED_SEED.encode(), f"{label}:{counter}".encode(),
+                        hashlib.sha256).digest()
+        counter += 1
+    return out[:length]
+
+
+def _b64(label, length):
+    """URL-safe-ish base64 characters, the shape most secrets take."""
+    import base64
+    raw = base64.b64encode(_digest(label, length)).decode()
+    return raw.rstrip("=")[:length]
+
+
+def _hex(label, length):
+    return _digest(label, length).hex()[:length]
+
+
+def _alnum(label, length, alphabet=_B32):
+    return "".join(alphabet[b % len(alphabet)] for b in _digest(label, length))
+
+
+def cred(kind, label):
+    """A decoy credential of the requested shape.
+
+    Shapes follow the real providers so a scanner that pattern-matches against
+    AWS or GitHub key formats sees something it recognises -- which is the point:
+    it should want to test them.
+    """
+    if kind == "aws_id":
+        return "AKIA" + _alnum(label, 16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    if kind == "aws_secret":
+        return _b64(label, 40)
+    if kind == "github":
+        return "ghp_" + _alnum(label, 36, "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    if kind == "db_password":
+        return _b64(label, 18) + "!" + _alnum(label + ":n", 3, "0123456789")
+    if kind == "password":
+        return _b64(label, 14) + "#" + _alnum(label + ":n", 2, "0123456789")
+    if kind == "jwt":
+        return _b64(label, 43)
+    if kind == "api_key":
+        return "sk_live_" + _alnum(label, 24, "abcdefghijklmnopqrstuvwxyz0123456789")
+    if kind == "ssh_key":
+        body = "".join(_b64(label + f":{i}", 64) for i in range(10))
+        lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+        return ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                + "\n".join(lines) + "\n"
+                "-----END OPENSSH PRIVATE KEY-----\n")
+    return _b64(label, 24)
 
 _SYSLOG = os.environ.get("SCANNERBAIT_SYSLOG", "")
 _SYSLOG_HOST, _, _SYSLOG_PORT = _SYSLOG.partition(":")
@@ -65,14 +133,16 @@ def _ship(body):
             logger.warning(format_event("syslog_ship_failed", target=_SYSLOG))
 
 
-def _host(default):
-    """Configured server name, or the given placeholder when unset.
+def _host(label):
+    """Compose a decoy hostname under the configured domain.
 
-    Decoy bodies name a host that looks like the organisation's own; when the
-    operator has not configured one the .invalid placeholder is kept, because
-    inventing a real-looking name is worse than an obvious placeholder.
+    ``label`` is the role being named -- "db", "code", "vpn" -- so the estate
+    reads as a set of distinct internal hosts rather than every service
+    collapsing onto one name. An empty label yields the bare domain.
     """
-    return SERVERNAME or default
+    label = (label or "").strip(".")
+    domain = DOMAIN or "fcp3.me"
+    return f"{label}.{domain}" if label else domain
 
 
 def client_address():
@@ -118,60 +188,94 @@ def _normalise_address(value):
 
 
 def decoy_response(path):
-    """Return inert fake data for common secret/config probes; never read local files."""
+    """Return fabricated data for common secret/config probes; never read local files.
+
+    Every value is shaped like the real thing: provider-accurate key formats,
+    internal-looking hostnames, consistent IDs. Nothing in a response labels
+    itself as fake, because a decoy that announces itself only wastes one
+    request. Credentials are derived from the configured seed, so they are
+    stable across requests without any secret being stored or transmitted.
+    """
     normalized = path.lower().rstrip("/") or "/"
     leaf = normalized.rsplit("/", 1)[-1]
 
     if normalized == "/robots.txt":
-        return ("User-agent: *\nDisallow: /admin/\nDisallow: /.well-known/internal/\n"
-                "Disallow: /backup/\n", "text/plain", 200)
+        return ("User-agent: *\nDisallow: /admin/\nDisallow: /internal/\n"
+                "Disallow: /backup/\nSitemap: https://" + _host("www") + "/sitemap.xml\n",
+                "text/plain", 200)
 
     if normalized in ("/.git/config", "/.gitconfig") or normalized.endswith("/.git/config"):
-        return ("[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
-                "\t[remote \"origin\"]\n\turl = https://" + _host("code.example.invalid") + "/bof/portal.git\n"
-                "\tfetch = +refs/heads/*:refs/remotes/origin/*\n", "text/plain", 200)
+        return ("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"
+                "\tlogallrefupdates = true\n"
+                "[remote \"origin\"]\n\turl = https://" + _host("code") + "/bof/portal.git\n"
+                "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+                "[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n"
+                "[user]\n\tname = Build Bot\n\temail = buildbot@" + DOMAIN + "\n",
+                "text/plain", 200)
 
     if normalized.endswith("/.git-credentials"):
-        return ("https://buildbot:DECOY_ONLY_NOT_A_TOKEN@" + _host("code.example.invalid") + "\n",
+        return ("https://buildbot:" + cred("github", "git:cred") + "@" + _host("code") + "\n",
                 "text/plain", 200)
 
     if (normalized.startswith("/.ssh/") or leaf in {
         "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "private.key", "key.pem", ".pem", ".ppk"
     } or leaf.endswith((".pem", ".ppk", ".key"))):
         if leaf in {"config", "known_hosts", "known_hosts.old", "authorized_keys"}:
-            return ("# Synthetic SSH decoy; no usable keys\nHost " + _host("staging.example.invalid") + "\n"
-                    "  HostName 192.0.2.44\n  User deploy\n", "text/plain", 200)
-        return ("-----BEGIN DECOY PRIVATE KEY-----\nNOT A REAL KEY - SCANNERBAIT TEST DATA\n"
-                "-----END DECOY PRIVATE KEY-----\n", "text/plain", 200)
+            return ("Host " + _host("staging") + "\n"
+                    "  HostName 10.20.4.18\n  User deploy\n"
+                    "  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking accept-new\n"
+                    "\nHost " + _host("git") + "\n  HostName 10.20.4.21\n  User git\n",
+                    "text/plain", 200)
+        return cred("ssh_key", "ssh:key:" + leaf), "text/plain", 200
 
     if normalized in ("/etc/passwd", "/etc/shadow") or normalized.endswith("/etc/passwd"):
-        return ("root:x:0:0:root:/root:/bin/bash\nwebapp:x:1001:1001:Web App:/srv/web:/usr/sbin/nologin\n"
-                "backup:x:1002:1002:Backup:/var/backups:/usr/sbin/nologin\n", "text/plain", 200)
-
-    if ".env" in leaf or leaf in {"credentials", "credentials.json", "credentials.yml", "credentials.yaml",
-                                 "secrets.yml", "secrets.yaml", "secret.yaml", "database.yml", "database.yaml"}:
-        return ("APP_NAME=BankPortal\nAPP_ENV=production\nDB_HOST=" + _host("db.example.invalid") + "\n"
-                "DB_USER=portal_readonly\nDB_PASSWORD=DECOY_ONLY_NOT_A_PASSWORD\n"
-                "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
-                "AWS_SECRET_ACCESS_KEY=DECOY_ONLY_NOT_A_CREDENTIAL\n"
-                "JWT_SECRET=DECOY_ONLY_NOT_A_SECRET\n", "text/plain", 200)
-
-    if leaf.endswith((".sqlite", ".sqlite3", ".db")):
-        return ("-- Synthetic database decoy; not a SQLite database\n"
-                "CREATE TABLE users (id INTEGER, username TEXT, password TEXT);\n"
-                "INSERT INTO users VALUES (1, 'decoy_user', 'DECOY_ONLY_NOT_A_PASSWORD');\n",
+        return ("root:x:0:0:root:/root:/bin/bash\n"
+                "webapp:x:1001:1001:Web App:/srv/web:/usr/sbin/nologin\n"
+                "backup:x:1002:1002:Backup:/var/backups:/usr/sbin/nologin\n"
+                "deploy:x:1003:1003:Deploy:/home/deploy:/bin/bash\n",
                 "text/plain", 200)
 
+    if ".env" in leaf or (leaf in {"credentials", "credentials.json", "credentials.yml", "credentials.yaml",
+                                 "secrets.yml", "secrets.yaml", "secret.yaml", "database.yml", "database.yaml"}
+                          and "/.aws/" not in normalized):
+        return ("APP_NAME=BankPortal\nAPP_ENV=production\n"
+                "DB_HOST=" + _host("db") + "\n"
+                "DB_USER=portal_readonly\nDB_PASSWORD=" + cred("db_password", "env:db") + "\n"
+                "AWS_ACCESS_KEY_ID=" + cred("aws_id", "env:aws") + "\n"
+                "AWS_SECRET_ACCESS_KEY=" + cred("aws_secret", "env:aws") + "\n"
+                "JWT_SECRET=" + cred("jwt", "env:jwt") + "\n"
+                "STRIPE_KEY=" + cred("api_key", "env:stripe") + "\n",
+                "text/plain", 200)
+
+    if leaf.endswith((".sqlite", ".sqlite3", ".db")):
+        return ("BEGIN TRANSACTION;\n"
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, "
+                "password_hash TEXT, role TEXT, created_at TEXT);\n"
+                "INSERT INTO users VALUES(1,'svc_portal','" + cred("password", "db:svc") +
+                "','admin','2025-11-03 09:14:22');\n"
+                "INSERT INTO users VALUES(2,'j.harris','" + cred("password", "db:jharris") +
+                "','staff','2025-12-18 16:02:51');\n"
+                "COMMIT;\n", "text/plain", 200)
+
     if "aws" in normalized or ".aws/" in normalized or leaf == "boto.cfg":
-        body = ("[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"
-                "aws_secret_access_key = DECOY_ONLY_NOT_A_CREDENTIAL\n"
-                "region = us-east-1\n")
-        return body, "text/plain", 200
+        return ("[default]\n"
+                "aws_access_key_id = " + cred("aws_id", "aws:default") + "\n"
+                "aws_secret_access_key = " + cred("aws_secret", "aws:default") + "\n"
+                "region = us-east-1\n\n"
+                "[profile backup]\n"
+                "aws_access_key_id = " + cred("aws_id", "aws:backup") + "\n"
+                "aws_secret_access_key = " + cred("aws_secret", "aws:backup") + "\n"
+                "region = us-east-1\n", "text/plain", 200)
 
     if any(x in normalized for x in ("google", "gcp", "firebase", "azure", "azuread", "aliyun")):
-        body = {"type": "service_account", "project_id": "bank-portal-decoy",
-                "client_email": "scannerbait@example.invalid", "private_key_id": "DECOY_ONLY",
-                "private_key": "NOT_A_REAL_PRIVATE_KEY", "client_secret": "DECOY_ONLY_NOT_A_SECRET"}
+        body = {"type": "service_account", "project_id": "bank-portal-prod",
+                "private_key_id": _hex("gcp:keyid", 40),
+                "private_key": cred("ssh_key", "gcp:pk"),
+                "client_email": "portal-sa@bank-portal-prod.iam.gserviceaccount.com",
+                "client_id": "104728391055271836442",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_secret": cred("jwt", "gcp:secret")}
         return json.dumps(body, indent=2), "application/json", 200
 
     if any(x in normalized for x in ("vpn", "wireguard", "openvpn", "tailscale", "zerotier", "xray",
@@ -181,32 +285,102 @@ def decoy_response(path):
                                       "okta", "keycloak", "sophos", "sonicwall", "watchguard", "juniper",
                                       "netskope", "netmotion", "pulse", "barracuda", "citrix", "cisco",
                                       "checkpoint", "paloalto", "forcepoint", "pritunl", "softether")):
-        return ("# Synthetic VPN profile; credentials and keys are intentionally unusable\n"
-                "server = 198.51.100.23\nport = 1194\nusername = decoy_user\n"
-                "password = DECOY_ONLY_NOT_A_PASSWORD\nprivate_key = NOT_A_REAL_PRIVATE_KEY\n",
+        return ("client\n"
+                "dev tun\n"
+                "proto udp\n"
+                "remote " + _host("vpn") + " 1194\n"
+                "resolv-retry infinite\n"
+                "nobind\n"
+                "persist-key\n"
+                "persist-tun\n"
+                "auth-user-pass\n"
+                "remote-cert-tls server\n"
+                "cipher AES-256-GCM\n"
+                "auth SHA256\n"
+                "<ca>\n" + cred("ssh_key", "vpn:ca") + "</ca>\n",
                 "text/plain", 200)
 
-    if any(x in normalized for x in ("terraform", ".tfvars", "backend.tf", "clouds.yaml", "kubeconfig")):
-        body = ("# Synthetic infrastructure decoy\nprovider \"aws\" {\n  region = \"us-east-1\"\n}\n"
-                "variable \"api_token\" { default = \"DECOY_ONLY_NOT_A_TOKEN\" }\n")
-        return body, "text/plain", 200
+    if "kubeconfig" in normalized or leaf in {"config", "kubeconfig"} and ".kube" in normalized:
+        # A real kubeconfig is YAML with base64 blobs, not a JSON credentials blob.
+        return ("apiVersion: v1\n"
+                "kind: Config\n"
+                "clusters:\n"
+                "- cluster:\n"
+                "    certificate-authority-data: " + _b64("kube:ca", 88) + "\n"
+                "    server: https://k8s." + DOMAIN + ":6443\n"
+                "  name: bankportal-prod\n"
+                "contexts:\n"
+                "- context:\n"
+                "    cluster: bankportal-prod\n"
+                "    user: deployer\n"
+                "    namespace: portal\n"
+                "  name: bankportal-prod\n"
+                "current-context: bankportal-prod\n"
+                "preferences: {}\n"
+                "users:\n"
+                "- name: deployer\n"
+                "  user:\n"
+                "    client-certificate-data: " + _b64("kube:cert", 88) + "\n"
+                "    client-key-data: " + _b64("kube:key", 88) + "\n",
+                "application/yaml", 200)
+
+    if leaf == ".tfvars" or normalized.endswith(".tfvars"):
+        # A .tfvars file is bare assignments. variable blocks belong in a .tf
+        # file; putting them here is a tell that the file was never real.
+        return ("# production estate, eu-west-1\n"
+                "db_password   = \"" + cred("db_password", "tf:db") + "\"\n"
+                "api_token     = \"" + cred("api_key", "tf:api") + "\"\n"
+                "aws_region    = \"us-east-1\"\n"
+                "instance_type = \"m6i.xlarge\"\n",
+                "text/plain", 200)
+
+    if "terraform" in normalized or "backend.tf" in normalized:
+        return ("terraform {\n"
+                "  required_version = \">= 1.6.0\"\n"
+                "  backend \"s3\" {\n"
+                "    bucket         = \"bankportal-tfstate\"\n"
+                "    key            = \"prod/network/terraform.tfstate\"\n"
+                "    region         = \"us-east-1\"\n"
+                "    dynamodb_table = \"bankportal-tflock\"\n"
+                "  }\n"
+                "}\n\n"
+                "provider \"aws\" {\n  region = var.aws_region\n}\n",
+                "text/plain", 200)
+
+    if "clouds.yaml" in normalized:
+        return ("clouds:\n"
+                "  openstack:\n"
+                "    auth:\n"
+                "      auth_url: https://identity." + DOMAIN + ":5000/v3\n"
+                "      username: portal-automation\n"
+                "      password: " + cred("password", "os:password") + "\n"
+                "      project_name: portal-prod\n"
+                "      user_domain_name: Default\n"
+                "    region_name: RegionOne\n",
+                "application/yaml", 200)
 
     if normalized in ("/docker-compose.yml", "/compose.yml", "/compose.yaml", "/docker-compose.override.yml"):
-        return ("services:\n  portal:\n    image: registry.example.invalid/bof/portal:1.4\n"
-                "    environment:\n      DB_HOST: db.example.invalid\n"
-                "      DB_PASSWORD: DECOY_ONLY_NOT_A_PASSWORD\n", "text/yaml", 200)
+        return ("services:\n  portal:\n    image: " + _host("registry") + "/bof/portal:1.4.2\n"
+                "    environment:\n      DB_HOST: " + _host("db") + "\n"
+                "      DB_PASSWORD: " + cred("db_password", "compose:db") + "\n"
+                "      REDIS_URL: redis://cache." + DOMAIN + ":6379/0\n",
+                "text/yaml", 200)
 
     if normalized in ("/appsettings.json", "/application.json", "/web.config") or leaf in {
         "appsettings.json", "application.properties", "application.yml", "application.yaml", "wrangler.toml",
         "vercel.json", "netlify.toml", "fly.toml", "render.yaml"
     }:
-        body = {"ConnectionStrings": {"Default": "Host=db.example.invalid;Password=DECOY_ONLY"},
-                "ApiKey": "DECOY_ONLY_NOT_A_KEY", "Environment": "Production-Decoy"}
+        body = {"ConnectionStrings": {
+                    "Default": "Host=" + _host("db") + ";Database=portal;Username=portal_app;"
+                               "Password=" + cred("db_password", "appsettings:db")},
+                "ApiKey": cred("api_key", "appsettings:api"),
+                "Environment": "Production"}
         return json.dumps(body, indent=2), "application/json", 200
 
     if "mcp" in normalized or "api" in normalized:
         body = {"status": "ok", "service": "portal-api", "version": "1.4.2",
-                "request_id": "decoy-7f3a91", "message": "Synthetic scannerbait response"}
+                "request_id": _hex("api:reqid", 16),
+                "build": "2026.10.14-3f8a91c"}
         return json.dumps(body), "application/json", 200
 
     # Generic but plausible synthetic data for secret/config-looking paths.
@@ -214,9 +388,11 @@ def decoy_response(path):
                                       "vault", "database", "mysql", "service-account", "passwd", "kubeconfig"))
             or leaf.endswith((".conf", ".cfg", ".json", ".yaml", ".yml", ".toml", ".ini", ".ovpn",
                               ".tfstate", ".tfvars", ".properties", ".xml"))):
-        body = {"status": "ok", "source": "backup", "username": "decoy_service",
-                "password": "DECOY_ONLY_NOT_A_PASSWORD", "token": "DECOY_ONLY_NOT_A_TOKEN",
-                "endpoint": "https://service.example.invalid"}
+        body = {"status": "ok", "source": "backup",
+                "username": "svc_backup",
+                "password": cred("password", "generic:pw"),
+                "token": cred("jwt", "generic:token"),
+                "endpoint": "https://" + _host("api")}
         return json.dumps(body, indent=2), "application/json", 200
 
     return "Not found\n", "text/plain", 404

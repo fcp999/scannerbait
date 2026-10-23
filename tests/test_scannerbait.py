@@ -7,6 +7,16 @@ from unittest.mock import patch
 import scannerbait
 
 
+MARKERS = ("DECOY", "NOT_A_REAL", "NOT A REAL", "EXAMPLE.INVALID", "SYNTHETIC",
+           "INTENTIONALLY UNUSABLE", "SCANNERBAIT TEST DATA", "decoy_user")
+
+
+def _self_identifies(body):
+    """True when a response labels itself as fabricated."""
+    text = body.decode(errors="replace").upper() if isinstance(body, bytes) else body.upper()
+    return [m for m in MARKERS if m.upper() in text]
+
+
 class ScannerbaitTests(unittest.TestCase):
     def setUp(self):
         self.client = scannerbait.app.test_client()
@@ -24,13 +34,14 @@ class ScannerbaitTests(unittest.TestCase):
                 elif path == "/etc/passwd":
                     self.assertIn(b"webapp:", response.data)
                 elif path == "/.git/config":
-                    # A plausible git config. It carries no literal "DECOY"
-                    # marker by design: a decoy that announces itself is a
-                    # worse decoy. Assert the shape instead.
                     self.assertIn(b"[core]", response.data)
-                    self.assertIn(b"example.invalid", response.data)
+                    self.assertIn(b"[remote \"origin\"]", response.data)
+                elif path == "/robots.txt":
+                    self.assertIn(b"Disallow:", response.data)
                 else:
-                    self.assertIn(b"DECOY", response.data.upper())
+                    # Nothing may announce itself as fake: the decoy has to look
+                    # like real configuration for a scanner to spend time on it.
+                    self.assertFalse(_self_identifies(response.data), path)
 
     def test_unknown_path_is_not_reflected(self):
         response = self.client.get("/scanner-nope?x=<script>")
@@ -81,19 +92,32 @@ class ServerNameTests(unittest.TestCase):
     def setUp(self):
         self.client = scannerbait.app.test_client()
 
-    def test_decoys_use_the_configured_server_name(self):
-        with patch.dict(os.environ, {"SCANNERBAIT_SERVERNAME": "intranet-dc01.example.test"}):
-            with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"):
-                for path in ("/.git/config", "/.env", "/.ssh/config"):
+    def test_decoys_use_the_configured_domain(self):
+        """Each decoy host is a distinct role under the configured domain.
+
+        Every service collapsing onto the bare server name would not look like
+        a real estate, so the label has to survive: db.<domain>, code.<domain>,
+        not intranet-dc01 for all three.
+        """
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"):
+            with patch.object(scannerbait, "DOMAIN", "example.test"):
+                expectations = {
+                    "/.git/config": "code.example.test",
+                    "/.env": "db.example.test",
+                    "/.ssh/config": "staging.example.test",
+                }
+                for path, host in expectations.items():
                     body = self.client.get(path).data.decode()
-                    self.assertIn("intranet-dc01.example.test", body, path)
+                    self.assertIn(host, body, path)
                     self.assertNotIn("example.invalid", body, path)
 
-    def test_placeholder_is_kept_when_unset(self):
-        with patch.object(scannerbait, "SERVERNAME", ""):
+    def test_hosts_use_the_internal_domain(self):
+        """Decoy hostnames come from the configured domain, never a placeholder."""
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"), \
+             patch.object(scannerbait, "DOMAIN", "example.test"):
             body = self.client.get("/.env").data.decode()
-            # An obvious placeholder beats inventing a real-looking hostname.
-            self.assertIn("example.invalid", body)
+        self.assertIn("db.example.test", body)
+        self.assertNotIn("example.invalid", body)
 
 
 class ClientAddressTests(unittest.TestCase):
@@ -202,3 +226,97 @@ class SyslogShippingTests(unittest.TestCase):
             with patch("scannerbait.socket.create_connection") as connect:
                 scannerbait.log_event("request", path="/.env")
             connect.assert_not_called()
+
+
+# Each probe path must return the file format a target would expect. A body that
+# is merely non-empty and free of markers still gets spotted instantly when the
+# shape is wrong -- a kubeconfig that is JSON, a .tfvars holding variable blocks.
+FORMAT_CASES = [
+    ("/.env", "dotenv"),
+    ("/.aws/credentials", "ini"),
+    ("/.aws/config", "ini"),
+    ("/.git/config", "ini"),
+    ("/.git-credentials", "url"),
+    ("/.ssh/config", "sshconfig"),
+    ("/.ssh/id_ed25519", "openssh"),
+    ("/.kube/config", "kubeconfig"),
+    ("/terraform.tfvars", "tfvars"),
+    ("/backend.tf", "hcl"),
+    ("/clouds.yaml", "yaml"),
+    ("/docker-compose.yml", "yaml"),
+    ("/appsettings.json", "json"),
+]
+
+
+def _yaml_load(text):
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - PyYAML is a test-only dependency
+        return None
+    try:
+        return yaml.safe_load(text)
+    except Exception:
+        return None
+
+
+def matches_format(text, kind):
+    """True when ``text`` is shaped like a file of ``kind``."""
+    stripped = text.strip()
+    if kind == "dotenv":
+        return bool(stripped) and all(
+            "=" in line for line in stripped.splitlines() if line.strip() and not line.startswith("#"))
+    if kind == "ini":
+        lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+        return lines[0].startswith("[") and any(" =" in l or "=" in l for l in lines)
+    if kind == "url":
+        return stripped.startswith("https://") and "@" in stripped.splitlines()[0]
+    if kind == "sshconfig":
+        return stripped.startswith("Host ") and "HostName" in stripped
+    if kind == "openssh":
+        return (stripped.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+                and stripped.endswith("-----END OPENSSH PRIVATE KEY-----"))
+    if kind == "kubeconfig":
+        loaded = _yaml_load(text)
+        return isinstance(loaded, dict) and loaded.get("kind") == "Config" \
+            and {"clusters", "contexts", "users"} <= set(loaded)
+    if kind == "tfvars":
+        # Bare assignments (comments allowed); a variable block is the wrong file.
+        if 'variable "' in stripped:
+            return False
+        lines = [l for l in stripped.splitlines() if l.strip() and not l.strip().startswith("#")]
+        return bool(lines) and all("=" in l for l in lines)
+    if kind == "hcl":
+        return stripped.startswith("terraform {") or stripped.startswith("provider \"")
+    if kind == "yaml":
+        loaded = _yaml_load(text)
+        return loaded is not None
+    if kind == "json":
+        import json as _json
+        try:
+            _json.loads(text)
+        except ValueError:
+            return False
+        return True
+    raise AssertionError("unknown format kind: " + kind)
+
+
+class DecoyFormatTests(unittest.TestCase):
+    """Each path returns the file shape it claims to be."""
+
+    def setUp(self):
+        self.client = scannerbait.app.test_client()
+
+    def test_each_path_returns_its_expected_format(self):
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"), \
+             patch.object(scannerbait, "DOMAIN", "example.test"):
+            for path, kind in FORMAT_CASES:
+                with self.subTest(path=path, kind=kind):
+                    response = self.client.get(path)
+                    self.assertEqual(response.status_code, 200, path)
+                    body = response.data.decode(errors="replace")
+                    self.assertTrue(matches_format(body, kind),
+                                    f"{path} is not {kind}:\n{body[:300]}")
+
+
+if __name__ == "__main__":
+    unittest.main()
