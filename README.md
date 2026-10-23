@@ -17,7 +17,7 @@ docker compose logs -f scannerbait
 
 ## Terminal-control decoy
 
-`/decoy/terminal.txt` returns sample log lines with commas and quotes plus real BEL/ANSI bytes by default. The eight BEL bytes may ring a bell, and `ESC[30;40m` makes enclosed text black on black until `ESC[0m` resets it. This is intentionally aimed at testing how scanners and loggers handle terminal controls.
+`/decoy/terminal.txt` returns sample log lines with commas and quotes plus real BEL/ANSI bytes by default. The 80 BEL bytes may ring a bell, and `ESC[30;40m` makes enclosed text black on black until `ESC[0m` resets it. This is intentionally aimed at testing how scanners and loggers handle terminal controls.
 
 To disable raw controls and return the visible strings `\x07` and `\x1b...` instead, set `SCANNERBAIT_RAW_CONTROLS=0` and recreate the container:
 

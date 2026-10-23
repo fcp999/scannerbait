@@ -39,7 +39,7 @@ class ScannerbaitTests(unittest.TestCase):
     def test_terminal_decoy_defaults_to_raw_controls(self):
         with patch.dict(os.environ, {}, clear=True):
             response = self.client.get("/decoy/terminal.txt")
-        self.assertEqual(response.data.count(b"\x07"), 8)
+        self.assertEqual(response.data.count(b"\x07"), 80)
         self.assertIn(b"\x1b[30;40m", response.data)
         self.assertIn(b"\x1b[0m", response.data)
         self.assertIn(b'comma, quote, decoy', response.data)

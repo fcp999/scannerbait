@@ -138,9 +138,9 @@ def terminal_decoy():
         "2026-10-23 09:41:04 WARN scanner probe captured",
     ]
     if raw:
-        body = "\x07" * 8 + "\n" + "\x1b[30;40mBLACK ON BLACK DECOY\x1b[0m\n" + "\n".join(lines) + "\n"
+        body = "\x07" * 80 + "\n" + "\x1b[30;40mBLACK ON BLACK DECOY\x1b[0m\n" + "\n".join(lines) + "\n"
     else:
-        body = r"\x07" * 8 + "\n" + r"\x1b[30;40mBLACK ON BLACK DECOY\x1b[0m\n" + "\n".join(lines) + "\n"
+        body = r"\x07" * 80 + "\n" + r"\x1b[30;40mBLACK ON BLACK DECOY\x1b[0m\n" + "\n".join(lines) + "\n"
     return Response(body, status=200, content_type="text/plain; charset=utf-8")
 
 
