@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,12 @@ class ScannerbaitTests(unittest.TestCase):
                     self.assertIn(b"Disallow:", response.data)
                 elif path == "/etc/passwd":
                     self.assertIn(b"webapp:", response.data)
+                elif path == "/.git/config":
+                    # A plausible git config. It carries no literal "DECOY"
+                    # marker by design: a decoy that announces itself is a
+                    # worse decoy. Assert the shape instead.
+                    self.assertIn(b"[core]", response.data)
+                    self.assertIn(b"example.invalid", response.data)
                 else:
                     self.assertIn(b"DECOY", response.data.upper())
 
@@ -50,6 +57,22 @@ class ScannerbaitTests(unittest.TestCase):
         self.assertNotIn(b"\x07", response.data)
         self.assertNotIn(b"\x1b", response.data)
         self.assertIn(b"\\x07", response.data)
+
+
+    def test_requests_do_not_write_an_access_log(self):
+        """Logging is stdout-only; a probe must never create an on-disk log.
+
+        The honeypot previously shared its log with a traffic generator, so a
+        real attack and a fabricated one were indistinguishable. Real events
+        only: nothing may be appended to disk for a request.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            before = set(os.listdir(tmp))
+            with patch.dict(os.environ, {"SCANNERBAIT_LOG": os.path.join(tmp, "access.log")}):
+                for path in ("/.env", "/admin/", "/robots.txt", "/scanner-nope"):
+                    self.client.get(path)
+            after = set(os.listdir(tmp))
+            self.assertEqual(before, after, f"request wrote to disk: {after - before}")
 
 
 if __name__ == "__main__":
