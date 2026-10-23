@@ -235,8 +235,9 @@ def decoy_response(path):
                 "deploy:x:1003:1003:Deploy:/home/deploy:/bin/bash\n",
                 "text/plain", 200)
 
-    if ".env" in leaf or leaf in {"credentials", "credentials.json", "credentials.yml", "credentials.yaml",
-                                 "secrets.yml", "secrets.yaml", "secret.yaml", "database.yml", "database.yaml"}:
+    if ".env" in leaf or (leaf in {"credentials", "credentials.json", "credentials.yml", "credentials.yaml",
+                                 "secrets.yml", "secrets.yaml", "secret.yaml", "database.yml", "database.yaml"}
+                          and "/.aws/" not in normalized):
         return ("APP_NAME=BankPortal\nAPP_ENV=production\n"
                 "DB_HOST=" + _host("db") + "\n"
                 "DB_USER=portal_readonly\nDB_PASSWORD=" + cred("db_password", "env:db") + "\n"
@@ -299,12 +300,64 @@ def decoy_response(path):
                 "<ca>\n" + cred("ssh_key", "vpn:ca") + "</ca>\n",
                 "text/plain", 200)
 
-    if any(x in normalized for x in ("terraform", ".tfvars", "backend.tf", "clouds.yaml", "kubeconfig")):
-        return ("# BankPortal production estate\n"
-                "provider \"aws\" {\n  region = \"us-east-1\"\n}\n\n"
-                "variable \"db_password\" { default = \"" + cred("db_password", "tf:db") + "\" }\n"
-                "variable \"api_token\" { default = \"" + cred("api_key", "tf:api") + "\" }\n",
+    if "kubeconfig" in normalized or leaf in {"config", "kubeconfig"} and ".kube" in normalized:
+        # A real kubeconfig is YAML with base64 blobs, not a JSON credentials blob.
+        return ("apiVersion: v1\n"
+                "kind: Config\n"
+                "clusters:\n"
+                "- cluster:\n"
+                "    certificate-authority-data: " + _b64("kube:ca", 88) + "\n"
+                "    server: https://k8s." + DOMAIN + ":6443\n"
+                "  name: bankportal-prod\n"
+                "contexts:\n"
+                "- context:\n"
+                "    cluster: bankportal-prod\n"
+                "    user: deployer\n"
+                "    namespace: portal\n"
+                "  name: bankportal-prod\n"
+                "current-context: bankportal-prod\n"
+                "preferences: {}\n"
+                "users:\n"
+                "- name: deployer\n"
+                "  user:\n"
+                "    client-certificate-data: " + _b64("kube:cert", 88) + "\n"
+                "    client-key-data: " + _b64("kube:key", 88) + "\n",
+                "application/yaml", 200)
+
+    if leaf == ".tfvars" or normalized.endswith(".tfvars"):
+        # A .tfvars file is bare assignments. variable blocks belong in a .tf
+        # file; putting them here is a tell that the file was never real.
+        return ("# production estate, eu-west-1\n"
+                "db_password   = \"" + cred("db_password", "tf:db") + "\"\n"
+                "api_token     = \"" + cred("api_key", "tf:api") + "\"\n"
+                "aws_region    = \"us-east-1\"\n"
+                "instance_type = \"m6i.xlarge\"\n",
                 "text/plain", 200)
+
+    if "terraform" in normalized or "backend.tf" in normalized:
+        return ("terraform {\n"
+                "  required_version = \">= 1.6.0\"\n"
+                "  backend \"s3\" {\n"
+                "    bucket         = \"bankportal-tfstate\"\n"
+                "    key            = \"prod/network/terraform.tfstate\"\n"
+                "    region         = \"us-east-1\"\n"
+                "    dynamodb_table = \"bankportal-tflock\"\n"
+                "  }\n"
+                "}\n\n"
+                "provider \"aws\" {\n  region = var.aws_region\n}\n",
+                "text/plain", 200)
+
+    if "clouds.yaml" in normalized:
+        return ("clouds:\n"
+                "  openstack:\n"
+                "    auth:\n"
+                "      auth_url: https://identity." + DOMAIN + ":5000/v3\n"
+                "      username: portal-automation\n"
+                "      password: " + cred("password", "os:password") + "\n"
+                "      project_name: portal-prod\n"
+                "      user_domain_name: Default\n"
+                "    region_name: RegionOne\n",
+                "application/yaml", 200)
 
     if normalized in ("/docker-compose.yml", "/compose.yml", "/compose.yaml", "/docker-compose.override.yml"):
         return ("services:\n  portal:\n    image: " + _host("registry") + "/bof/portal:1.4.2\n"

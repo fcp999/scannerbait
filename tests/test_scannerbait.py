@@ -226,3 +226,97 @@ class SyslogShippingTests(unittest.TestCase):
             with patch("scannerbait.socket.create_connection") as connect:
                 scannerbait.log_event("request", path="/.env")
             connect.assert_not_called()
+
+
+# Each probe path must return the file format a target would expect. A body that
+# is merely non-empty and free of markers still gets spotted instantly when the
+# shape is wrong -- a kubeconfig that is JSON, a .tfvars holding variable blocks.
+FORMAT_CASES = [
+    ("/.env", "dotenv"),
+    ("/.aws/credentials", "ini"),
+    ("/.aws/config", "ini"),
+    ("/.git/config", "ini"),
+    ("/.git-credentials", "url"),
+    ("/.ssh/config", "sshconfig"),
+    ("/.ssh/id_ed25519", "openssh"),
+    ("/.kube/config", "kubeconfig"),
+    ("/terraform.tfvars", "tfvars"),
+    ("/backend.tf", "hcl"),
+    ("/clouds.yaml", "yaml"),
+    ("/docker-compose.yml", "yaml"),
+    ("/appsettings.json", "json"),
+]
+
+
+def _yaml_load(text):
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - PyYAML is a test-only dependency
+        return None
+    try:
+        return yaml.safe_load(text)
+    except Exception:
+        return None
+
+
+def matches_format(text, kind):
+    """True when ``text`` is shaped like a file of ``kind``."""
+    stripped = text.strip()
+    if kind == "dotenv":
+        return bool(stripped) and all(
+            "=" in line for line in stripped.splitlines() if line.strip() and not line.startswith("#"))
+    if kind == "ini":
+        lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+        return lines[0].startswith("[") and any(" =" in l or "=" in l for l in lines)
+    if kind == "url":
+        return stripped.startswith("https://") and "@" in stripped.splitlines()[0]
+    if kind == "sshconfig":
+        return stripped.startswith("Host ") and "HostName" in stripped
+    if kind == "openssh":
+        return (stripped.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+                and stripped.endswith("-----END OPENSSH PRIVATE KEY-----"))
+    if kind == "kubeconfig":
+        loaded = _yaml_load(text)
+        return isinstance(loaded, dict) and loaded.get("kind") == "Config" \
+            and {"clusters", "contexts", "users"} <= set(loaded)
+    if kind == "tfvars":
+        # Bare assignments (comments allowed); a variable block is the wrong file.
+        if 'variable "' in stripped:
+            return False
+        lines = [l for l in stripped.splitlines() if l.strip() and not l.strip().startswith("#")]
+        return bool(lines) and all("=" in l for l in lines)
+    if kind == "hcl":
+        return stripped.startswith("terraform {") or stripped.startswith("provider \"")
+    if kind == "yaml":
+        loaded = _yaml_load(text)
+        return loaded is not None
+    if kind == "json":
+        import json as _json
+        try:
+            _json.loads(text)
+        except ValueError:
+            return False
+        return True
+    raise AssertionError("unknown format kind: " + kind)
+
+
+class DecoyFormatTests(unittest.TestCase):
+    """Each path returns the file shape it claims to be."""
+
+    def setUp(self):
+        self.client = scannerbait.app.test_client()
+
+    def test_each_path_returns_its_expected_format(self):
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"), \
+             patch.object(scannerbait, "DOMAIN", "example.test"):
+            for path, kind in FORMAT_CASES:
+                with self.subTest(path=path, kind=kind):
+                    response = self.client.get(path)
+                    self.assertEqual(response.status_code, 200, path)
+                    body = response.data.decode(errors="replace")
+                    self.assertTrue(matches_format(body, kind),
+                                    f"{path} is not {kind}:\n{body[:300]}")
+
+
+if __name__ == "__main__":
+    unittest.main()
