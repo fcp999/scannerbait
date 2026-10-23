@@ -7,6 +7,16 @@ from unittest.mock import patch
 import scannerbait
 
 
+MARKERS = ("DECOY", "NOT_A_REAL", "NOT A REAL", "EXAMPLE.INVALID", "SYNTHETIC",
+           "INTENTIONALLY UNUSABLE", "SCANNERBAIT TEST DATA", "decoy_user")
+
+
+def _self_identifies(body):
+    """True when a response labels itself as fabricated."""
+    text = body.decode(errors="replace").upper() if isinstance(body, bytes) else body.upper()
+    return [m for m in MARKERS if m.upper() in text]
+
+
 class ScannerbaitTests(unittest.TestCase):
     def setUp(self):
         self.client = scannerbait.app.test_client()
@@ -24,13 +34,14 @@ class ScannerbaitTests(unittest.TestCase):
                 elif path == "/etc/passwd":
                     self.assertIn(b"webapp:", response.data)
                 elif path == "/.git/config":
-                    # A plausible git config. It carries no literal "DECOY"
-                    # marker by design: a decoy that announces itself is a
-                    # worse decoy. Assert the shape instead.
                     self.assertIn(b"[core]", response.data)
-                    self.assertIn(b"example.invalid", response.data)
+                    self.assertIn(b"[remote \"origin\"]", response.data)
+                elif path == "/robots.txt":
+                    self.assertIn(b"Disallow:", response.data)
                 else:
-                    self.assertIn(b"DECOY", response.data.upper())
+                    # Nothing may announce itself as fake: the decoy has to look
+                    # like real configuration for a scanner to spend time on it.
+                    self.assertFalse(_self_identifies(response.data), path)
 
     def test_unknown_path_is_not_reflected(self):
         response = self.client.get("/scanner-nope?x=<script>")
@@ -81,19 +92,32 @@ class ServerNameTests(unittest.TestCase):
     def setUp(self):
         self.client = scannerbait.app.test_client()
 
-    def test_decoys_use_the_configured_server_name(self):
-        with patch.dict(os.environ, {"SCANNERBAIT_SERVERNAME": "intranet-dc01.example.test"}):
-            with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"):
-                for path in ("/.git/config", "/.env", "/.ssh/config"):
+    def test_decoys_use_the_configured_domain(self):
+        """Each decoy host is a distinct role under the configured domain.
+
+        Every service collapsing onto the bare server name would not look like
+        a real estate, so the label has to survive: db.<domain>, code.<domain>,
+        not intranet-dc01 for all three.
+        """
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"):
+            with patch.object(scannerbait, "DOMAIN", "example.test"):
+                expectations = {
+                    "/.git/config": "code.example.test",
+                    "/.env": "db.example.test",
+                    "/.ssh/config": "staging.example.test",
+                }
+                for path, host in expectations.items():
                     body = self.client.get(path).data.decode()
-                    self.assertIn("intranet-dc01.example.test", body, path)
+                    self.assertIn(host, body, path)
                     self.assertNotIn("example.invalid", body, path)
 
-    def test_placeholder_is_kept_when_unset(self):
-        with patch.object(scannerbait, "SERVERNAME", ""):
+    def test_hosts_use_the_internal_domain(self):
+        """Decoy hostnames come from the configured domain, never a placeholder."""
+        with patch.object(scannerbait, "SERVERNAME", "intranet-dc01.example.test"), \
+             patch.object(scannerbait, "DOMAIN", "example.test"):
             body = self.client.get("/.env").data.decode()
-            # An obvious placeholder beats inventing a real-looking hostname.
-            self.assertIn("example.invalid", body)
+        self.assertIn("db.example.test", body)
+        self.assertNotIn("example.invalid", body)
 
 
 class ClientAddressTests(unittest.TestCase):
