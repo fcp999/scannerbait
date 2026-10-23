@@ -20,7 +20,7 @@ docker compose logs -f scannerbait
 `/decoy/terminal.txt` returns sample log lines with commas and quotes plus bell/ANSI sequences. By default, the sequences are literal text (`\x07`, `\x1b...`) and cannot ring a bell or recolor a terminal. To return actual BEL and ANSI bytes, explicitly set `SCANNERBAIT_RAW_CONTROLS=1` in the container environment and recreate it:
 
 ```sh
-docker compose up -d --force-recreate
+SCANNERBAIT_RAW_CONTROLS=1 docker compose up -d --force-recreate
 ```
 
 Raw mode is off by default because terminal control bytes can disrupt or obscure downstream logs. Only enable it on a honeypot you control and when intentionally testing a scanner or logger. The route is a response body only; controls are never placed in HTTP headers or this server's own logs.
