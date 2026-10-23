@@ -1,5 +1,3 @@
-
-
 services:
   scannerbait:
     build: .
@@ -14,3 +12,4 @@ services:
       - /tmp
     environment:
       - PYTHONUNBUFFERED=1
+      - SCANNERBAIT_RAW_CONTROLS=0
