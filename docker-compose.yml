@@ -13,3 +13,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - SCANNERBAIT_RAW_CONTROLS=${SCANNERBAIT_RAW_CONTROLS:-1}
+      # Ship events to the syslog collector on the host (promtail -> loki).
+      # The docker0 gateway address works from an isolated compose bridge;
+      # the collector's container name does not resolve across networks.
+      - SCANNERBAIT_SYSLOG=${SCANNERBAIT_SYSLOG:-172.17.0.1:514}
