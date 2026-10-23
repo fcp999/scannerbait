@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import re
 import sys
 from flask import Flask, Response, request
 

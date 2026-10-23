@@ -18,6 +18,12 @@ class ScannerbaitTests(unittest.TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.data)
+                if path == "/robots.txt":
+                    self.assertIn(b"Disallow:", response.data)
+                elif path == "/etc/passwd":
+                    self.assertIn(b"webapp:", response.data)
+                else:
+                    self.assertIn(b"DECOY", response.data.upper())
 
     def test_unknown_path_is_not_reflected(self):
         response = self.client.get("/scanner-nope?x=<script>")
