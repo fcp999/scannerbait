@@ -1,5 +1,6 @@
 """A small web honeypot that serves inert, synthetic decoys to common probes."""
 
+import ipaddress
 import json
 import logging
 import os
@@ -72,6 +73,48 @@ def _host(default):
     inventing a real-looking name is worse than an obvious placeholder.
     """
     return SERVERNAME or default
+
+
+def client_address():
+    """Caller address as IPv4 or IPv6, preferring X-Forwarded-For.
+
+    Behind HAProxy the socket peer is the proxy, not the scanner, so the real
+    address arrives in X-Forwarded-For. The header is a comma-separated chain
+    (client, proxy1, proxy2); the left-most entry is the originator and the one
+    worth logging.
+
+    The value is untrusted: a scanner can send its own X-Forwarded-For. It is
+    therefore validated as an IP literal and otherwise falls back to the socket
+    peer, so a spoofed or malformed header can never inject arbitrary text into
+    the log.
+
+    IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) are unwrapped to plain dotted
+    quad, because that is what a dual-stack listener reports and what an analyst
+    expects to read. Genuine IPv6 stays in its native form.
+    """
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    for candidate in (forwarded.split(",")[0].strip() if forwarded else "", request.remote_addr):
+        address = _normalise_address(candidate)
+        if address:
+            return address
+    return request.remote_addr or "-"
+
+
+def _normalise_address(value):
+    """Return a clean textual IP for ``value``, or None when it is not one."""
+    if not value:
+        return None
+    text = value.strip()
+    # Tolerate the bracketed host:port form some proxies emit for IPv6.
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if address.version == 6 and address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(address)
 
 
 def decoy_response(path):
@@ -195,7 +238,7 @@ def terminal_decoy():
 
 @app.route("/", methods=["GET", "HEAD"])
 def index():
-    log_event("request", ip=request.remote_addr, method=request.method, path=request.path, outcome="home")
+    log_event("request", ip=client_address(), method=request.method, path=request.path, outcome="home")
     return Response("<html><title>Bank of Florida</title><h1>Welcome to Bank of Florida</h1></html>",
                     content_type="text/html; charset=utf-8")
 
@@ -204,13 +247,13 @@ def index():
 def catch_all(path):
     normalized = "/" + path
     if normalized == "/decoy/terminal.txt":
-        log_event("request", ip=request.remote_addr, method=request.method, path=request.path, outcome="terminal_decoy")
+        log_event("request", ip=client_address(), method=request.method, path=request.path, outcome="terminal_decoy")
         return terminal_decoy()
 
     if normalized in {"/login", "/admin", "/admin/login.asp", "/wp-login.php", "/search"}:
         form = request.form
         # Never store passwords. User-controlled fields are JSON-escaped in logs.
-        log_event("login_probe", ip=request.remote_addr, path=request.path,
+        log_event("login_probe", ip=client_address(), path=request.path,
                   username=form.get("user", form.get("log", ""))[:120],
                   password_length=len(form.get("pass", form.get("pwd", ""))))
         if request.method == "GET":
@@ -221,12 +264,12 @@ def catch_all(path):
         return Response("Invalid credentials\n", status=200, content_type="text/plain; charset=utf-8")
 
     if normalized == "/product":
-        log_event("request", ip=request.remote_addr, method=request.method, path=request.path,
+        log_event("request", ip=client_address(), method=request.method, path=request.path,
                   outcome="product_probe", query_keys=sorted(request.args.keys()))
         return Response("Product unavailable\n", status=404, content_type="text/plain; charset=utf-8")
 
     body, content_type, status = decoy_response(normalized)
-    log_event("request", ip=request.remote_addr, method=request.method, path=request.path,
+    log_event("request", ip=client_address(), method=request.method, path=request.path,
               outcome="decoy" if status == 200 else "not_found", status=status)
     return Response(body, status=status, content_type=content_type + "; charset=utf-8")
 

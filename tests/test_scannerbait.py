@@ -96,6 +96,44 @@ class ServerNameTests(unittest.TestCase):
             self.assertIn("example.invalid", body)
 
 
+class ClientAddressTests(unittest.TestCase):
+    """The logged address is the originating client, in a readable form."""
+
+    def setUp(self):
+        self.client = scannerbait.app.test_client()
+
+    def _logged_ip(self, headers):
+        with patch.object(scannerbait, "log_event") as log:
+            self.client.get("/.env", headers=headers)
+        return log.call_args.kwargs["ip"], log.call_args.args[0]
+
+    def test_prefers_forwarded_for_over_socket_peer(self):
+        ip, _ = self._logged_ip({"X-Forwarded-For": "203.0.113.7"})
+        self.assertEqual(ip, "203.0.113.7")
+
+    def test_takes_leftmost_entry_of_a_chain(self):
+        ip, _ = self._logged_ip({"X-Forwarded-For": "203.0.113.7, 10.0.0.1, 10.0.0.2"})
+        self.assertEqual(ip, "203.0.113.7")
+
+    def test_ipv4_mapped_ipv6_is_unwrapped(self):
+        ip, _ = self._logged_ip({"X-Forwarded-For": "::ffff:198.51.100.9"})
+        self.assertEqual(ip, "198.51.100.9")
+
+    def test_genuine_ipv6_is_preserved(self):
+        ip, _ = self._logged_ip({"X-Forwarded-For": "2001:db8::1"})
+        self.assertEqual(ip, "2001:db8::1")
+
+    def test_malformed_header_falls_back_to_socket_peer(self):
+        # A scanner can send its own header; it must never reach the log as text.
+        ip, _ = self._logged_ip({"X-Forwarded-For": "<script>alert(1)</script>"})
+        self.assertEqual(ip, "127.0.0.1")
+
+    def test_login_probe_also_uses_the_client_address(self):
+        with patch.object(scannerbait, "log_event") as log:
+            self.client.get("/wp-login.php", headers={"X-Forwarded-For": "203.0.113.9"})
+        self.assertEqual(log.call_args.kwargs["ip"], "203.0.113.9")
+
+
 if __name__ == "__main__":
     unittest.main()
 
