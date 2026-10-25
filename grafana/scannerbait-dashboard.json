@@ -1,0 +1,101 @@
+{
+  "uid": "scannerbait",
+  "title": "Scannerbait — Honeypot Probes",
+  "tags": ["scannerbait", "honeypot", "syslog"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Probes over time",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "loki", "uid": "cfw7omdnm7pq8c"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time({app=\"scannerbait\"} | json | event=\"request\" [1m]))",
+          "legendFormat": "requests"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(count_over_time({app=\"scannerbait\"} | json | event=\"login_probe\" [1m]))",
+          "legendFormat": "login probes"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 2,
+      "type": "piechart",
+      "title": "Outcomes",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "loki", "uid": "cfw7omdnm7pq8c"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (count_over_time({app=\"scannerbait\"} | json | line_format \"{{.outcome}}\" [24h]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value"]}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Top source addresses",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "loki", "uid": "cfw7omdnm7pq8c"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (ip) (count_over_time({app=\"scannerbait\"} | json | ip!=\"\" [24h])))",
+          "legendFormat": "{{ip}}"
+        }
+      ],
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Most probed paths",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "loki", "uid": "cfw7omdnm7pq8c"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(20, sum by (path) (count_over_time({app=\"scannerbait\"} | json | path!=\"\" [24h])))"
+        }
+      ],
+      "transformations": [
+        {"id": "reduce", "options": {"reducers": ["lastNotNull"]}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "Field": false}}}
+      ],
+      "options": {"showHeader": true, "sortBy": [{"displayName": "Value", "desc": true}]}
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Live probe log",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "loki", "uid": "cfw7omdnm7pq8c"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"scannerbait\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
+      }
+    }
+  ]
+}
