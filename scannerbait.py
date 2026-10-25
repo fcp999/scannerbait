@@ -46,15 +46,28 @@ DOMAIN = os.environ.get("SCANNERBAIT_DOMAIN", "") or (
 # so no credential ever has to be written down or passed around, and a
 # redeploy with the same seed serves identical secrets.
 CRED_SEED = os.environ.get("SCANNERBAIT_CRED_SEED", "") or "scannerbait-decoy-seed"
+# Rotation period for decoy credentials. A credential is stable for the whole
+# window, so a scanner that probes the same path twice sees the same secret and
+# has no reason to think the box is inconsistent. Set to 0 to disable rotation.
+CRED_ROTATE_SECONDS = int(os.environ.get("SCANNERBAIT_CRED_ROTATE_SECONDS", "86400") or 86400)
+# The window a credential belongs to. Derived from the wall clock, not stored,
+# so a restart mid-window keeps serving the same values.
+CRED_WINDOW = int(time.time() // CRED_ROTATE_SECONDS) if CRED_ROTATE_SECONDS > 0 else 0
 _B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+
+def _rotating_seed():
+    """Seed plus window, so rotation is deterministic within a 24h bucket."""
+    return f"{CRED_SEED}:{CRED_WINDOW}" if CRED_WINDOW else CRED_SEED
 
 
 def _digest(label, length=32):
     """Deterministic bytes for a labelled slot, keyed by the configured seed."""
     out = b""
     counter = 0
+    seed = _rotating_seed()
     while len(out) < length:
-        out += hmac.new(CRED_SEED.encode(), f"{label}:{counter}".encode(),
+        out += hmac.new(seed.encode(), f"{label}:{counter}".encode(),
                         hashlib.sha256).digest()
         counter += 1
     return out[:length]

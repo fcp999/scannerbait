@@ -30,4 +30,11 @@ The controls are confined to this route's response body. They are never placed i
 ## Configure
 
 - `PORT`: listener port inside the container; default `80`.
+- `SCANNERBAIT_CRED_ROTATE_SECONDS`: how long a decoy credential stays
+  stable, default `86400` (24 hours). Values are never stored: they are derived
+  from `SCANNERBAIT_CRED_SEED` plus the current window, so a credential is
+  identical for every probe inside a window and changes at the boundary. Set to
+  `0` to disable rotation and get one fixed set per seed.
+- `SCANNERBAIT_CRED_SEED`: the secret the decoys are derived from. Change it to
+  re-key every decoy credential immediately; leave it unset for the default.
 - `SCANNERBAIT_RAW_CONTROLS`: `1` by default; set to `0` to return escaped visible text from the dedicated decoy route.
