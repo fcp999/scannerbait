@@ -53,6 +53,19 @@ CRED_ROTATE_SECONDS = int(os.environ.get("SCANNERBAIT_CRED_ROTATE_SECONDS", "864
 # The window a credential belongs to. Derived from the wall clock, not stored,
 # so a restart mid-window keeps serving the same values.
 CRED_WINDOW = int(time.time() // CRED_ROTATE_SECONDS) if CRED_ROTATE_SECONDS > 0 else 0
+# Peers allowed to set X-Forwarded-For. HAProxy reaches the container through the
+# published port, so it appears as the Docker host address. Anything else that
+# sends the header is treated as a scanner lying about its address.
+_TRUSTED_DEFAULT = "172.16.0.0/12,192.168.0.204/32,192.168.0.209/32"
+TRUSTED_PROXIES = []
+for _entry in (os.environ.get("SCANNERBAIT_TRUSTED_PROXY", "") or _TRUSTED_DEFAULT).split(","):
+    _entry = _entry.strip()
+    if not _entry:
+        continue
+    try:
+        TRUSTED_PROXIES.append(ipaddress.ip_network(_entry, strict=False))
+    except ValueError:
+        logger.warning("ignoring invalid SCANNERBAIT_TRUSTED_PROXY entry: %r", _entry)
 _B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 
@@ -159,28 +172,52 @@ def _host(label):
 
 
 def client_address():
-    """Caller address as IPv4 or IPv6, preferring X-Forwarded-For.
+    """Caller address as IPv4 or IPv6, taken from the proxy-supplied header.
 
-    Behind HAProxy the socket peer is the proxy, not the scanner, so the real
-    address arrives in X-Forwarded-For. The header is a comma-separated chain
-    (client, proxy1, proxy2); the left-most entry is the originator and the one
-    worth logging.
+    A scanner reaches the honeypot through HAProxy, so the socket peer is the
+    proxy rather than the scanner. HAProxy appends its own X-Forwarded-For
+    header without rewriting one the client already sent, so a single request
+    can carry several headers: the scanner's fabricated value first, the real
+    client last.
 
-    The value is untrusted: a scanner can send its own X-Forwarded-For. It is
-    therefore validated as an IP literal and otherwise falls back to the socket
-    peer, so a spoofed or malformed header can never inject arbitrary text into
-    the log.
+    Only the last header is trusted. It is the one HAProxy wrote, and it is the
+    only entry the scanner cannot control. Everything to the left of it was
+    supplied by the scanner and is discarded rather than parsed.
 
-    IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) are unwrapped to plain dotted
-    quad, because that is what a dual-stack listener reports and what an analyst
-    expects to read. Genuine IPv6 stays in its native form.
+    The last header is also preferred because it is the only one that reliably
+    carries the dual-stack form: HAProxy reports the peer it accepted the
+    connection from as ::ffff:a.b.c.d, which unwraps to the dotted quad an
+    analyst expects to read.
+
+    The peer must still be a trusted proxy. A direct hit on the published port
+    is logged as itself, so a scanner cannot write a forged address into the
+    log by addressing the container directly. Trusted peers are configured with
+    SCANNERBAIT_TRUSTED_PROXY.
     """
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    for candidate in (forwarded.split(",")[0].strip() if forwarded else "", request.remote_addr):
-        address = _normalise_address(candidate)
-        if address:
-            return address
-    return request.remote_addr or "-"
+    peer = _normalise_address(request.remote_addr)
+    if peer and _is_trusted_proxy(peer):
+        # getlist keeps duplicate headers; .get() returns only the first, which
+        # is exactly the forged one.
+        values = request.headers.getlist("X-Forwarded-For")
+        if values:
+            # The last header is HAProxy's; a scanner prepending its own cannot
+            # displace it. Within that header take the last entry for the same
+            # reason, in case a chained proxy appended to it.
+            hops = [h.strip() for h in values[-1].split(",") if h.strip()]
+            if hops:
+                address = _normalise_address(hops[-1])
+                if address:
+                    return address
+    return peer or "-"
+
+
+def _is_trusted_proxy(address):
+    """True when ``address`` is a proxy allowed to set X-Forwarded-For."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(ip in network for network in TRUSTED_PROXIES)
 
 
 def _normalise_address(value):
