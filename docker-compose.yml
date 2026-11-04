@@ -20,3 +20,22 @@ services:
       # Hostname the decoys present themselves as, so a probe sees the box's
       # own name rather than an obvious placeholder.
       - SCANNERBAIT_SERVERNAME=${SCANNERBAIT_SERVERNAME:-intranet-dc01.fcp3.me}
+
+  mdns:
+    profiles: ["mdns"]
+    build: .
+    command: ["python", "-B", "mdns_listener.py"]
+    ports:
+      - "${SCANNERBAIT_MDNS_BIND:-127.0.0.1}:15353:5353/udp"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCANNERBAIT_SYSLOG=${SCANNERBAIT_SYSLOG:-172.17.0.1:514}
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
